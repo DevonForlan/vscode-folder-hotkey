@@ -1,7 +1,7 @@
 ﻿Add-Type -AssemblyName System.Windows.Forms
 
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "選擇要在 VS Code 開啟的資料夾"
+$dialog.Description = "Select a folder to open in VS Code"
 $dialog.ShowNewFolderButton = $true
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
