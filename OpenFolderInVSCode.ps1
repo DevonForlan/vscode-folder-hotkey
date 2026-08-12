@@ -26,23 +26,28 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         problemMatcher = @()
     }
 
-    if (Test-Path $tasksPath) {
-        $existing = $null
-        try { $existing = Get-Content $tasksPath -Raw | ConvertFrom-Json } catch {}
-        if ($existing -and $existing.tasks) {
-            $hasTask = $existing.tasks | Where-Object { $_.label -eq $taskLabel }
-            if (-not $hasTask) {
-                $existing.tasks = @($existing.tasks) + $autoTerminalTask
-                $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tasksPath -Encoding UTF8
+    try {
+        if (Test-Path $tasksPath) {
+            $existing = $null
+            try { $existing = Get-Content $tasksPath -Raw | ConvertFrom-Json } catch {}
+            if ($existing -and $existing.tasks) {
+                $hasTask = $existing.tasks | Where-Object { $_.label -eq $taskLabel }
+                if (-not $hasTask) {
+                    $existing.tasks = @($existing.tasks) + $autoTerminalTask
+                    $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tasksPath -Encoding UTF8
+                }
             }
+        } else {
+            New-Item -ItemType Directory -Path $vscodeDir -Force | Out-Null
+            $tasksJson = [ordered]@{
+                version = "2.0.0"
+                tasks = @($autoTerminalTask)
+            }
+            $tasksJson | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tasksPath -Encoding UTF8
         }
-    } else {
-        New-Item -ItemType Directory -Path $vscodeDir -Force | Out-Null
-        $tasksJson = [ordered]@{
-            version = "2.0.0"
-            tasks = @($autoTerminalTask)
-        }
-        $tasksJson | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tasksPath -Encoding UTF8
+    } catch {
+        # Auto-terminal setup is a nice-to-have. If the folder isn't writable
+        # (network share, permissions, etc.), still open VS Code below.
     }
 
     Start-Process "code" -ArgumentList @($targetFolder) -WindowStyle Hidden
