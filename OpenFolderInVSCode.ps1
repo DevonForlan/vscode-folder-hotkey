@@ -90,7 +90,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         # (network share, permissions, etc.), still open VS Code below.
     }
 
-    Start-Process "code" -ArgumentList @($targetFolder) -WindowStyle Hidden
+    # Windows PowerShell 5.1's Start-Process does not reliably quote array
+    # elements containing spaces, so a path like "OneDrive - Company Name\..."
+    # gets split into multiple broken arguments. Quote it ourselves instead.
+    Start-Process "code" -ArgumentList "`"$targetFolder`"" -WindowStyle Hidden
 
     # code.cmd returns before the actual window exists/updates, and Windows
     # blocks this hidden background process from stealing foreground focus
