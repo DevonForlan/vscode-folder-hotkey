@@ -8,6 +8,7 @@ Press a global hotkey, pick a folder from a native picker, and it opens directly
 - Pick a folder → VS Code opens it
 - Automatically writes a `.vscode/tasks.json` in that folder (`runOn: folderOpen`), so opening it in VS Code also opens an integrated terminal already `cd`'d into that folder
 - If the folder already has a `tasks.json`, it's not overwritten — the task is merged in, and running it again won't add a duplicate
+- Forces the new VS Code window to the foreground even though Windows normally blocks background processes from stealing focus
 
 ## Install
 
@@ -35,6 +36,10 @@ Two-modifier combos like `Ctrl+Alt+<letter>` are commonly intercepted by Chinese
 - The shortcut points at `OpenFolderInVSCode.vbs`, run hidden via `wscript.exe`, to avoid flashing a console window
 - The `.vbs` calls `OpenFolderInVSCode.ps1` with a hidden window: it shows the folder picker, then runs `code <folder>`
 - `install.ps1` also turns on `task.allowAutomaticTasks` in your VS Code user settings, so opening a new folder never prompts you to confirm the automatic task. If you'd rather keep that confirmation, revert the setting — VS Code will ask once per folder and remember your choice
+
+## Performance
+
+The folder picker itself should appear in well under 100ms. The one thing that could delay it: the foreground-focus workaround needs a small C# type compiled via `Add-Type`, which costs ~900ms the first time in a process (Windows PowerShell 5.1 has no cross-process cache for this). That compile is deferred until after you've picked a folder — it runs while VS Code is already launching in the background, so it doesn't delay the picker itself.
 
 ## Uninstall
 

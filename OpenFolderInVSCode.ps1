@@ -1,6 +1,12 @@
 ﻿Add-Type -AssemblyName System.Windows.Forms
 
-Add-Type @"
+# The Win32Focus C# type is only needed after a folder is picked, but
+# Add-Type with inline C# source takes ~900ms to compile (first use per
+# process) - compiling it here would delay the folder picker itself. It's
+# declared as a function so the actual Add-Type call can be deferred until
+# after ShowDialog(), overlapping with VS Code's own startup time instead.
+function Register-Win32FocusType {
+    Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32Focus {
@@ -14,6 +20,7 @@ public class Win32Focus {
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 "@
+}
 
 function Force-ForegroundWindow {
     param($hwnd)
@@ -94,6 +101,11 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     # elements containing spaces, so a path like "OneDrive - Company Name\..."
     # gets split into multiple broken arguments. Quote it ourselves instead.
     Start-Process "code" -ArgumentList "`"$targetFolder`"" -WindowStyle Hidden
+
+    # Compile the focus-forcing type now, while VS Code is starting up in the
+    # background - this ~900ms cost overlaps with that wait instead of adding
+    # to it.
+    Register-Win32FocusType
 
     # code.cmd returns before the actual window exists/updates, and Windows
     # blocks this hidden background process from stealing foreground focus
