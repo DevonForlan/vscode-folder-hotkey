@@ -54,6 +54,13 @@ Getting here took three changes and one measured dead end:
 - **Going resident.** Even a perfectly optimized script can't avoid `powershell.exe`'s own ~500ms startup when a new process is spawned per keypress. The daemon pays that once at login instead.
 - **Dead end: rewriting it as a compiled `.exe`.** In theory a .NET exe starts in ~50ms versus PowerShell's ~500ms. Measured on the same machine, the freshly compiled unsigned exe took **2.5–3.4s per launch** — antivirus rescans unsigned executables in user-writable locations on every run, dwarfing the startup savings. Reverted.
 
+### Gotchas found while building the daemon
+
+Two bugs here produced the same symptom — "pressing the hotkey does nothing" — for completely different reasons, and both are easy to hit again:
+
+- **A dialog with no owner window opens behind everything.** The daemon has no visible window of its own, so the picker was appearing instantly but underneath whatever the user was looking at. It now shows the dialog owned by a 1×1 off-screen top-most form that is pushed to the foreground first. (A process that just received a registered hotkey is permitted to take the foreground, which is what makes this work.)
+- **Exceptions inside a WinForms event handler are swallowed by the message loop.** A daemon that throws on every press looks identical to one whose hotkey never registered. The handler now logs failures to `%TEMP%\OpenFolderInVSCode-error.log`. The original throw was `Application.EnableVisualStyles()` being called after a window already existed — it now runs once at the top of the script, before anything is created.
+
 ### Tradeoffs of the daemon
 
 - One resident `powershell.exe`, roughly 40–60MB of RAM

@@ -12,6 +12,27 @@ param(
 
 Add-Type -AssemblyName System.Windows.Forms
 
+# Must run before any window is created. In daemon mode the hidden hotkey
+# window is created at startup, so this cannot live inside the picker function.
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# Errors raised inside a WinForms event handler are swallowed by the message
+# loop, which would leave a daemon that silently does nothing on every press.
+# Record them instead.
+$script:ErrorLogPath = Join-Path $env:TEMP "OpenFolderInVSCode-error.log"
+
+function Write-ErrorLog {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    try {
+        $lines = @(
+            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $($ErrorRecord.Exception.GetType().FullName): $($ErrorRecord.Exception.Message)"
+            $ErrorRecord.ScriptStackTrace
+            ''
+        )
+        $lines | Add-Content -LiteralPath $script:ErrorLogPath
+    } catch { }
+}
+
 # Compiling inline C# costs ~900ms the first time in a process. In daemon mode
 # that happens once at login; in one-shot mode it's deferred until after the
 # folder is picked, so it overlaps VS Code's own startup instead of delaying
@@ -159,9 +180,40 @@ function Invoke-OpenFolderInVSCode {
     $dialog.Description = "Select a folder to open in VS Code"
     $dialog.ShowNewFolderButton = $true
 
-    [System.Windows.Forms.Application]::EnableVisualStyles()
+    # The daemon owns no visible window, so an unowned dialog opens *behind*
+    # whatever the user is looking at - it appears not to have worked at all.
+    # Give it a 1x1 off-screen top-most owner and push that to the foreground
+    # first; the dialog then comes up with it. Windows permits the foreground
+    # change here because this process just received the hotkey.
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $owner.Left = -32000
+    $owner.Top = -32000
+    $owner.Width = 1
+    $owner.Height = 1
+    $owner.ShowInTaskbar = $false
+    $owner.TopMost = $true
 
-    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    try {
+        $owner.Show()
+        $owner.Activate()
+
+        # Only available once the C# helper is compiled - true in daemon mode
+        # (compiled at startup). In one-shot mode it isn't compiled yet, and
+        # deliberately isn't compiled here: that costs ~900ms and would delay
+        # the picker, which a normally-launched process doesn't need anyway.
+        if ('Win32Focus' -as [type]) {
+            [void][Win32Focus]::SetForegroundWindow($owner.Handle)
+        }
+
+        $result = $dialog.ShowDialog($owner)
+    }
+    finally {
+        $owner.Close()
+        $owner.Dispose()
+    }
+
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return }
     $targetFolder = $dialog.SelectedPath
 
     # Auto-terminal setup is a nice-to-have. If the folder isn't writable
@@ -187,9 +239,13 @@ if (-not $Daemon) {
 
 # ---------------- daemon mode ----------------
 
-# Only one daemon may own the hotkey at a time.
-$mutex = New-Object System.Threading.Mutex($false, "OpenFolderInVSCodeDaemon")
-if (-not $mutex.WaitOne(0)) { return }
+# Only one daemon may own the hotkey at a time. Held in a script-scope variable
+# so the mutex isn't garbage collected (which would release it) while we run.
+$script:DaemonMutex = New-Object System.Threading.Mutex($false, "OpenFolderInVSCodeDaemon")
+$acquired = $false
+try { $acquired = $script:DaemonMutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+if (-not $acquired) { return }
 
 # Pay the inline-C# compile cost once, now, rather than on the first hotkey press.
 Register-Win32FocusType
@@ -254,6 +310,12 @@ if (-not $window.Register($modifiers, $virtualKey)) {
     return
 }
 
-$window.add_HotkeyPressed({ Invoke-OpenFolderInVSCode })
+$window.add_HotkeyPressed({
+    try { Invoke-OpenFolderInVSCode }
+    catch { Write-ErrorLog -ErrorRecord $_ }
+})
 
 [System.Windows.Forms.Application]::Run((New-Object System.Windows.Forms.ApplicationContext))
+
+# Keeps the mutex referenced (and therefore held) for the daemon's whole life.
+$script:DaemonMutex.ReleaseMutex()
