@@ -33,13 +33,25 @@ Two-modifier combos like `Ctrl+Alt+<letter>` are commonly intercepted by Chinese
 ## How it works
 
 - `install.ps1` creates a shortcut under Start Menu \ Programs and sets its "Shortcut key" property — a built-in Windows global-hotkey mechanism, no extra software required
-- The shortcut points at `OpenFolderInVSCode.vbs`, run hidden via `wscript.exe`, to avoid flashing a console window
-- The `.vbs` calls `OpenFolderInVSCode.ps1` with a hidden window: it shows the folder picker, then runs `code <folder>`
+- The shortcut runs `powershell.exe -WindowStyle Hidden -File OpenFolderInVSCode.ps1`: it shows the folder picker, then runs `code <folder>` and forces that window to the foreground
 - `install.ps1` also turns on `task.allowAutomaticTasks` in your VS Code user settings, so opening a new folder never prompts you to confirm the automatic task. If you'd rather keep that confirmation, revert the setting — VS Code will ask once per folder and remember your choice
 
 ## Performance
 
-The folder picker itself should appear in well under 100ms. The one thing that could delay it: the foreground-focus workaround needs a small C# type compiled via `Add-Type`, which costs ~900ms the first time in a process (Windows PowerShell 5.1 has no cross-process cache for this). That compile is deferred until after you've picked a folder — it runs while VS Code is already launching in the background, so it doesn't delay the picker itself.
+Measured on a corporate Windows 11 machine with endpoint security software, hotkey press → folder picker visible:
+
+| Version | Time |
+|---|---|
+| Original (`wscript.exe` → `.vbs` → hidden `powershell.exe`) | ~3.7s |
+| Current (shortcut → `powershell.exe` directly) | ~0.5–1.1s |
+
+Two things mattered, and one thing that sounds obvious didn't:
+
+- **Dropping the `.vbs`/`wscript.exe` wrapper was the big win.** It existed only to hide the console window, which `powershell.exe -WindowStyle Hidden` already does. That chain — VBScript silently spawning a hidden PowerShell — is a classic malware pattern, so security software inspects it heavily; removing it cut roughly 3 seconds.
+- **Deferring `Add-Type`.** The foreground-focus workaround needs a small C# type compiled at runtime, which costs ~900ms on first use per process. It now compiles *after* you've picked a folder, overlapping with VS Code's own startup instead of delaying the picker.
+- **Rewriting the whole thing as a compiled `.exe` made it worse, not better.** In theory a .NET exe starts in ~50ms versus PowerShell's ~500ms. Measured on the same machine, the freshly compiled unsigned exe took **2.5–3.4s per launch** — antivirus scans unsigned executables in user-writable locations on every run, and that cost dwarfed the startup savings. Reverted.
+
+What remains (~500ms) is essentially `powershell.exe` startup itself, which no script-level change can avoid.
 
 ## Uninstall
 
