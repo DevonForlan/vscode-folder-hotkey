@@ -7,7 +7,16 @@ param(
 
     # Hotkey used in daemon mode. Modifiers are fixed at Ctrl+Shift+Alt; this
     # is just the letter.
-    [string]$HotkeyLetter = "O"
+    [string]$HotkeyLetter = "O",
+
+    # Diagnostic mode: the auto-created terminal dumps its own environment
+    # (via Dump-Environment.ps1) to %TEMP%\OpenFolderInVSCode-env-task-*.txt
+    # before dropping into an interactive prompt, instead of just opening
+    # plain "powershell". Compare that dump against one taken from a
+    # manually-opened terminal (run Dump-Environment.ps1 -Label manual there)
+    # with Compare-Environment.ps1, to see exactly how the two environments
+    # differ instead of guessing.
+    [switch]$DebugEnvironment
 )
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -134,8 +143,75 @@ function Focus-VSCodeWindow {
     }
 }
 
-function Set-AutoTerminalTask {
+function Start-VSCodeSanitized {
     param([string]$TargetFolder)
+
+    # Root cause (confirmed 2026-08-28 via a live PEB/ReadProcessMemory read
+    # of the running daemon, matched against this repo's own memory record of
+    # which Claude Code session originally started it): if the daemon is ever
+    # started from inside a Claude Code session - even just once - every
+    # process it later spawns via Start-Process inherits that session's
+    # CLAUDE_CODE_*/CLAUDECODE/AI_AGENT/ANTHROPIC_* identity variables,
+    # forever, until the daemon itself is restarted. That includes every
+    # `code.exe` launched by a hotkey press, and everything Code.exe in turn
+    # spawns (every integrated terminal, manual or task) - even though the
+    # daemon may have been started days or weeks earlier and that original
+    # session has long since ended. A `claude` run inside one of those
+    # terminals inherits a dead parent session's identity and stops behaving
+    # like an independent, resumable top-level session.
+    #
+    # Fixing this here - at the exact point code.exe is spawned - makes the
+    # tool immune to the bug regardless of how the daemon itself was
+    # launched, rather than relying on daemon launch hygiene.
+    #
+    # Implementation note: this was first written to route through
+    # `cmd.exe /c code "..."` via ProcessStartInfo (needed because a bare
+    # `code` on PATH resolves to a .cmd shim, which ProcessStartInfo can't
+    # launch directly with UseShellExecute=$false). That corrupted CJK
+    # characters in the target path - reproduced against this repo's own
+    # folder, which lives under "...\桌面\個人\..." - almost certainly cmd.exe
+    # re-serializing the command line through the console's ANSI codepage
+    # when it re-invokes the shim. Instead: temporarily clear the
+    # contamination vars from *this* process's own environment, reuse the
+    # already-proven Start-Process call below unchanged (it already handles
+    # this repo's own CJK path correctly today), then restore them - the
+    # child only ever sees the clean snapshot, and nothing about path
+    # handling changes.
+    #
+    # Uses [System.Environment] rather than the Env: PSDrive throughout:
+    # that provider has been observed to throw ("已經加入含有相同索引鍵的
+    # 項目") or return stale/incomplete results in exactly this contaminated
+    # context, while the .NET API reads/writes the real process environment
+    # block directly.
+    $contaminationPrefixes = @('CLAUDE', 'ANTHROPIC', 'AI_AGENT')
+    $namesToStrip = @([System.Environment]::GetEnvironmentVariables().Keys) | Where-Object {
+        $name = $_
+        $contaminationPrefixes | Where-Object { $name -like "$_*" }
+    }
+
+    $saved = @{}
+    foreach ($name in $namesToStrip) {
+        $saved[$name] = [System.Environment]::GetEnvironmentVariable($name)
+        [System.Environment]::SetEnvironmentVariable($name, $null)
+    }
+
+    try {
+        # Windows PowerShell 5.1's Start-Process does not reliably quote array
+        # elements containing spaces, so a path like "OneDrive - Company Name\..."
+        # gets split into multiple broken arguments. Quote it ourselves instead.
+        Start-Process "code" -ArgumentList "`"$TargetFolder`"" -WindowStyle Hidden
+    } finally {
+        foreach ($name in $saved.Keys) {
+            [System.Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+    }
+}
+
+function Set-AutoTerminalTask {
+    param(
+        [string]$TargetFolder,
+        [switch]$DebugEnvironment
+    )
 
     $vscodeDir = Join-Path $TargetFolder ".vscode"
     $tasksPath = Join-Path $vscodeDir "tasks.json"
@@ -153,6 +229,11 @@ function Set-AutoTerminalTask {
             focus = $true
         }
         problemMatcher = @()
+    }
+
+    if ($DebugEnvironment) {
+        $dumpScript = Join-Path $PSScriptRoot "Dump-Environment.ps1"
+        $autoTerminalTask.args = @("-NoExit", "-File", $dumpScript, "-Label", "task")
     }
 
     if (Test-Path $tasksPath) {
@@ -218,12 +299,9 @@ function Invoke-OpenFolderInVSCode {
 
     # Auto-terminal setup is a nice-to-have. If the folder isn't writable
     # (network share, permissions, etc.), still open VS Code below.
-    try { Set-AutoTerminalTask -TargetFolder $targetFolder } catch {}
+    try { Set-AutoTerminalTask -TargetFolder $targetFolder -DebugEnvironment:$script:DebugEnvironment } catch {}
 
-    # Windows PowerShell 5.1's Start-Process does not reliably quote array
-    # elements containing spaces, so a path like "OneDrive - Company Name\..."
-    # gets split into multiple broken arguments. Quote it ourselves instead.
-    Start-Process "code" -ArgumentList "`"$targetFolder`"" -WindowStyle Hidden
+    Start-VSCodeSanitized -TargetFolder $targetFolder
 
     # No-op in daemon mode (already compiled at startup); in one-shot mode this
     # runs while VS Code is starting, so its cost overlaps that wait.

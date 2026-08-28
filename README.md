@@ -67,6 +67,16 @@ Two bugs here produced the same symptom — "pressing the hotkey does nothing" �
 - If it's killed, the hotkey stops working until you log in again or re-run the Startup shortcut
 - One-shot mode still works: running `OpenFolderInVSCode.ps1` with no arguments does a single pick-and-open, no daemon involved
 
+### Fixed: Claude Code sessions opened via the hotkey couldn't resume
+
+Because the daemon is a long-lived resident process, if it was ever started from *inside* a Claude Code session — even just once, possibly days or weeks earlier — every process it later spawned via `Start-Process` inherited that session's identity environment variables (`CLAUDE*`, `ANTHROPIC*`, `AI_AGENT*`) for as long as the daemon kept running. That included every `code.exe` window opened by a hotkey press, and everything Code.exe itself spawned in turn (every integrated terminal, manual or task-created). A `claude` process started inside one of those terminals inherited a dead parent session's identity instead of starting its own, so `claude --resume` couldn't find or reconstruct an independent session for that terminal.
+
+The fix strips those variable prefixes from the daemon's own process environment for the instant it spawns `code.exe`, then restores them immediately after — so the child only ever sees a clean environment, regardless of how the daemon itself was originally launched. Nothing else (`PATH`, `JAVA_HOME`, or any other ordinary environment variable) is touched.
+
+Verified manually: `claude --resume` now works both from a terminal VS Code opens automatically and from one opened by hand, and still works after closing VS Code entirely and reopening the same folder from a brand-new PowerShell window.
+
+`Dump-Environment.ps1` and `Compare-Environment.ps1` are the diagnostic tools used to track this down — run `OpenFolderInVSCode.ps1 -DebugEnvironment` to have the auto-opened terminal dump its environment to `%TEMP%`, then compare it against a dump from a manually-opened terminal. Environment variables that look credential-shaped (token/secret/password/key/auth/cookie) are masked in the dump.
+
 ## Uninstall
 
 1. Delete the Startup shortcut: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Open Folder in VS Code (hotkey daemon).lnk`
